@@ -29,19 +29,15 @@ from sklearn.feature_extraction import DictVectorizer
 from sklearn.model_selection import train_test_split
 from sklearn.tree import DecisionTreeClassifier
 
-
 from pyspark.sql.functions import *
 from pyspark.sql.types import *
 
-df_original = spark.read.csv("abfss://sandbox@stupramonitoreomercado.dfs.core.windows.net/OTROS/SNR/nombres_entrenamiento_espanol_filtrados/nombres_entrenamiento_filtrados_test.csv",header=True)
+df_original = spark.read.csv("abfss://sandbox@stupramonitoreomercado.dfs.core.windows.net/OTROS/SNR/nombres_entrenamiento_espanol_filtrados/nombres_entrenamiento_filtrados_v2.csv",header=True)
 display(df_original)
-
 
 #almacenando los nombres por genero a pandas dataframes
 df_pd_nombres_mf_general = df_original.select("*").toPandas()
 df_pd_nombres_mf_general.head()
-
-
 
 # Limpieza de datos
 # Verificando consistencia de columnnas 
@@ -54,25 +50,23 @@ print(df_pd_nombres_mf_general.dtypes)
 print(df_pd_nombres_mf_general.isnull().isnull().sum())
 
 # Numero de nombres femeninos
-print("Numero de nombres femeninos: %s" %(len(df_pd_nombres_mf_general[df_pd_nombres_mf_general.sex == 'F'])))
+print("Numero de nombres femeninos: %s" %(len(df_pd_nombres_mf_general[df_pd_nombres_mf_general.SEXO == 'FEMENINO'])))
 # Numero de nombres masculinos
-print("Numero de nombres masculinos: %s" %(len(df_pd_nombres_mf_general[df_pd_nombres_mf_general.sex == 'M'])))
+print("Numero de nombres masculinos: %s" %(len(df_pd_nombres_mf_general[df_pd_nombres_mf_general.SEXO == 'MASCULINO'])))
 
 df_names = df_pd_nombres_mf_general
 
 # Remplazando con ceros y unos.
-df_names.sex.replace({'F':0,'M':1},inplace=True)
-df_names.sex.unique()
+df_names.SEXO.replace({'FEMENINO':0,'MASCULINO':1},inplace=True)
+df_names.SEXO.unique()
 df_names.dtypes
 
-Xfeatures = df_pd_nombres_mf_general['name']
-
+Xfeatures = df_pd_nombres_mf_general['PRIMER_NOMBRE']
 
 #Extraccion de las características del df vectorizando
 cv = CountVectorizer()
 X = cv.fit_transform(Xfeatures.values.astype('U')) #Con el fin de no generar problemas en nombres con determinados carcateres 
 cv.get_feature_names()
-
 
 # Conformando el diccionario con la extraccion de las primeras y ultimas letras de cada uno de los nombres
 def features(name):
@@ -85,26 +79,22 @@ def features(name):
         'last2-letters': name[-2:], # Ultimas dos letras
         'last3-letters': name[-3:], # Ultimas tres letras
     }
-    
-    
-    
+
 # Vectorize the features function
 features = np.vectorize(features)
 #Ejemplo
 print(features(["Anna", "Camilo", "Antonio","Margarita","Judith","Samuel"]))
 
-
 #Extrayendo las características para el conjunto de datos vectorizado
-df_X = features(df_names['name'].values.astype('U'))
-df_y = df_names['sex']
+df_X = features(df_names['PRIMER_NOMBRE'].values.astype('U'))
+df_y = df_names['SEXO']
 
 #Ejemplo
 arreglo = features(["Mike", "Julia"])
 dv = DictVectorizer()
-dv.fit(corpus)
+dv.fit(arreglo)
 transformed = dv.transform(arreglo)
 print(transformed)
-
 
 dv.get_feature_names()
 
@@ -113,7 +103,6 @@ dfX_train, dfX_test, dfy_train, dfy_test = train_test_split(df_X, df_y, test_siz
 dfX_train
 dv = DictVectorizer()
 dv.fit_transform(dfX_train)
-
 
 #Definicion del clasificador Decision Trees
 dclf = DecisionTreeClassifier()
@@ -128,40 +117,81 @@ def prediccionGenero(a):
     
     if dclf.predict(vector) == 0:
         #print("Female")
-        return "Female"
+        return "FEMENINO"
     else:
         #print("Male")
-        return("Male")
-        
+        return("MASCULINO")
+
+#Calculando precisión (Accuracy) del modelo teniendo en cuenta los datos de entrenamiento
+print("Accuracy sobre los datos de entrenamiento: %s" %(dclf.score(dv.transform(dfX_train), dfy_train)))
+
+#Calculando precisión (Accuracy) del modelo teniendo en cuenta los datos testeo
+print("Accuracy sobre los datos de testeo: %s" %(dclf.score(dv.transform(dfX_test), dfy_test)))
+
+dbutils.fs.mount(
+  source = "wasbs://standarized@stupramonitoreomercado.blob.core.windows.net",
+  mount_point = "/mnt/auxiliar_2",
+  extra_configs = {"fs.azure.account.key.stupramonitoreomercado.blob.core.windows.net":"GlhaYCap6LQYbAwFb8PF3nzT3iPsjbTV6DmMB8rG08ms4R4KPcBn2Y3Y0p4OAtLCTqk8NS80y2tfBe0Ga2El7w=="}
+)
+
+import pickle
+from sklearn.externals import joblib
+import tempfile
+import os
+from joblib import dump, load
+
+s = pickle.dumps(dclf)
+classifier2 = pickle.loads(s)
+tmpFile = tempfile.NamedTemporaryFile(delete=False)
+dump(dclf, tmpFile)
+tmpFile.flush()
+#print(clf2)
+
+#copiando el modelo en pkl desde el punto de montaje al datalake
+dump(classifier2, '/tmp/modelo_gender_pred_dt.pkl') 
+dbutils.fs.cp('file:/tmp/modelo_gender_pred_dt.pkl', '/mnt/auxiliar_2/OTROS/SNR/modelo_gender_pred_dt_dl.pkl')
+
+dbutils.fs.cp('/mnt/auxiliar_2/OTROS/SNR/modelo_gender_pred_dt_dl.pkl', '/tmp/modelo_gender_pred_dt_saved.pkl', )
+display(dbutils.fs.ls ("/tmp/"))
+classifier_Final = joblib.load('/dbfs/tmp/modelo_gender_pred_dt_saved.pkl')
 
 #leyendo el archivo desde el json del storage y alamcenandolo como pandas dataframe
 dbutils.fs.ls("abfss://sandbox@stupramonitoreomercado.dfs.core.windows.net/OTROS/SNR/")
 #df_from_json = spark.read.json("abfss://sandbox@stupramonitoreomercado.dfs.core.windows.net/OTROS/SNR/nombres_apellido_nombre.json")
-df_from_json = spark.read.json("abfss://sandbox@stupramonitoreomercado.dfs.core.windows.net/OTROS/SNR/nombres_comunes_masculino_femenino.json")
+#df_from_json = spark.read.json("abfss://sandbox@stupramonitoreomercado.dfs.core.windows.net/OTROS/SNR/nombres_comunes_masculino_femenino.json")
+df_from_json = spark.read.json("abfss://standarized@stupramonitoreomercado.dfs.core.windows.net/OTROS/SNR/intervinientes_clean_sexo_nombres_rurales_pendientes_modelo_similaridad.json")
 
 display(df_from_json)
 
 df_to_predict = df_from_json.select("*").toPandas()
-df_to_predict.head()     
-
+df_to_predict.head()
 
 #Prediccion de los nuevos nombres que se le presentan al modelo
 final_gender = []
 
 #for item in df_to_predict.NOMBRES:
-for item in df_to_predict.PRIMER_NOMBRE:    
+for item in df_to_predict.PRIMER_NOMBRE:
     #print("Nombre: %s ---- Genero: %s" %(item,clf.predict((item, ))))
     if pd.isnull(item) == True or item == '':
         final_gender.append("")
     else:
         final_gender.append(prediccionGenero(item))
 
-#Campo donde se almacena la predicción de los nombres      
+#Campo donde se almacena la predicción de los nombres 
 df_to_predict['PREDICCION'] = final_gender
 display(df_to_predict)
 
+df_final_Selection = df_to_predict[['id','PRIMER_NOMBRE','SEXO','PREDICCION', 'TIPO_CLASIFICACION']]
+df_no_similarity = df_final_Selection[df_final_Selection['TIPO_CLASIFICACION'].isnull()]
+df_no_similarity['TIPO_CLASIFICACION'] = 'MODELO_ML'
+df_no_similarity.SEXO = np.where(df_no_similarity.SEXO.isnull(), df_no_similarity.PREDICCION, df_no_similarity.SEXO)
+
+final_table_to_export = df_no_similarity[['id','PRIMER_NOMBRE','SEXO','TIPO_CLASIFICACION']]
+display(df_final_Selection)
+display(final_table_to_export)
+print("Numero de nombres que fueron predecidos: %s" %(len(final_table_to_export)))
 
 #Guardando los reusltados de la predicción en CSV hacia el data lake
 #df_to_predict.to_csv('/tmp/Prediccion_nombres_apellido_nombre.csv', index=False)
-df_to_predict.to_csv('/tmp/Prediccion_nombres_para_clasificar.csv', index=False)
-dbutils.fs.cp('file:/tmp/Prediccion_nombres_para_clasificar.csv', '/mnt/auxiliar/OTROS/KAGGLE/nombres_espanol_entrenamiento_test1/Prediccion_final_nombres_nombres_comunes_para_clasificar.csv')
+df_to_predict.to_csv('/tmp/prediccion_intervinientes_clean_sexo_nombres_rurales_pendientes_modelo_ml_v1.csv', index=False)
+dbutils.fs.cp('file:/tmp/prediccion_intervinientes_clean_sexo_nombres_rurales_pendientes_modelo_ml_v1.csv', '/mnt/auxiliar_2/OTROS/SNR/prediccion_intervinientes_clean_sexo_nombres_rurales_pendientes_modelo_ml_v1.csv')
